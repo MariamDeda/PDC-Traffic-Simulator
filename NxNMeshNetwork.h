@@ -1,26 +1,5 @@
 #ifndef NXN_MESH_NETWORK_H
 #define NXN_MESH_NETWORK_H
-
-/*
- *  Coordinate layout (row 0 = top, col 0 = left):
- *
- *      col0   col1  ... col(N-1)
- *  row0  [0,0] [0,1] ... [0,N-1]
- *  row1  [1,0] [1,1] ...
- *  ...
- *  row(N-1)
- *
- *  Horizontal edges: [r,c] --EAST--> [r,c+1]  /  [r,c+1] --WEST--> [r,c]
- *  Vertical   edges: [r,c] --SOUTH-> [r+1,c]  /  [r+1,c] --NORTH-> [r,c]
- *
- * Each node owns an Intersection, a DecentralizedController, and a
- * TrafficGenerator (scenario is set per-node, defaults to NORMAL).
- *
- * The class exposes two step() overloads:
- *   step_centralized(controllers, delta, t)  — caller passes one Controller per node
- *   step_decentralized(delta, t)             — uses built-in DecentralizedControllers
- */
-
 #include "Intersection.h"
 #include "CONTROLLER.h"
 #include "DecentralizedController.h"

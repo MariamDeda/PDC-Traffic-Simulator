@@ -354,6 +354,7 @@ public:
     int get_vehicles_processed() const { return vehicles_processed_; }
     double get_total_wait_time() const { return total_wait_time_; }
     std::string get_id() const { return id_; }
+    const TimingConstraints& get_constraints() const { return constraints_; }  // ADDED
 
     void print_state() const {
         auto state = get_state();

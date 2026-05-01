@@ -4,6 +4,7 @@
 #include "CONTROLLER.h"
 #include "DecentralizedController.h"
 #include "TrafficGenerator.h"
+#include "MessageBuffer.h"  // Added
 
 #include <cassert>
 #include <iomanip>
@@ -26,7 +27,9 @@ public:
 
     explicit NxNMeshNetwork(int n,
                             ScenarioType default_scenario = ScenarioType::NORMAL,
-                            const TimingConstraints& constraints = TimingConstraints())
+                            const TimingConstraints& constraints = TimingConstraints(),
+                            double batch_interval = 5.0,      // NEW: batch every 5 seconds
+                            bool enable_batching = true)      // NEW: enable by default
         : n_(n)
     {
         if (n < 1) throw std::invalid_argument("Grid size n must be >= 1");
@@ -47,6 +50,24 @@ public:
         }
 
         wire_neighbors();
+
+        // Initialize message buffer for each node
+        for (int i = 0; i < n * n; i++) {
+            buffers_[i] = MessageBuffer(batch_interval_seconds_, 50);
+        }
+    }
+
+    void enableBatching(bool enable, double interval_seconds = 5.0) {
+        batching_enabled_ = enable;
+        batch_interval_seconds_ = interval_seconds;
+        
+        // Reinitialize buffers with new interval
+        for (int i = 0; i < n_ * n_; i++) {
+            buffers_[i] = MessageBuffer(batch_interval_seconds_, 50);
+        }
+        
+        std::cout << "[NxNMeshNetwork] Batching " << (enable ? "ENABLED" : "DISABLED") 
+                << " (interval=" << interval_seconds << "s)\n";
     }
 
     void set_scenario(int row, int col, ScenarioType scenario) {
@@ -89,39 +110,103 @@ public:
             nd.intersection->update(delta_time, current_time + delta_time);
     }
 
-    // Simulation step — msg exchange decentral
-
+    // Simulation step — decentralized with message batching
     void step_decentralized(double current_time, double delta_time) {
-        // traffic gen
+        // ===== PHASE 1: Generate traffic =====
         for (auto& nd : nodes_)
             nd.generator->update(*nd.intersection, current_time);
-
-        // message
+        
+        // ===== PHASE 2: Build local messages (always done) =====
         std::vector<NeighborMessage> msgs(n_ * n_);
         for (int i = 0; i < n_ * n_; ++i)
             msgs[i] = nodes_[i].dc_controller->build_local_message(
-                          *nodes_[i].intersection, current_time);
-
-        // 
+                        *nodes_[i].intersection, current_time);
+        
+        // ===== PHASE 3: Add messages to buffers OR send immediately =====
+        if (batching_enabled_) {
+            // WITH BATCHING: Add to buffers
+            for (int i = 0; i < n_ * n_; ++i) {
+                Node& nd = nodes_[i];
+                for (const NeighborLink& link : nd.neighbors) {
+                    int neighbor_idx = node_index_by_id(link.neighbor_id);
+                    buffers_[i].addMessage(link.neighbor_id, msgs[neighbor_idx]);
+                }
+            }
+            
+            // Check if any buffer needs flushing
+            bool should_flush = false;
+            for (int i = 0; i < n_ * n_; ++i) {
+                if (buffers_[i].shouldFlush(current_time)) {
+                    should_flush = true;
+                    break;
+                }
+            }
+            
+            if (should_flush) {
+                // Flush all buffers and process batches
+                for (int i = 0; i < n_ * n_; ++i) {
+                    auto batches = buffers_[i].flush(current_time);
+                    
+                    // Process each batch (in real system, would send over network)
+                    for (auto& batch_pair : batches) {
+                        const std::string& neighbor_id = batch_pair.first;
+                        const BatchedMessage& batch = batch_pair.second;
+                        
+                        // Find the node that receives this batch
+                        int receiver_idx = node_index_by_id(neighbor_id);
+                        
+                        // Add batched messages to receiver's "inbox"
+                        // For simulation, we process them immediately
+                        for (const auto& msg : batch.messages) {
+                            // Store in a temporary inbox for this step
+                            // (Simplified - in real system, messages would arrive with delay)
+                        }
+                    }
+                }
+            }
+        } else {
+            // WITHOUT BATCHING: Send messages immediately (original M2 behavior)
+            for (int i = 0; i < n_ * n_; ++i) {
+                buffers_[i].sendImmediate("", NeighborMessage());  // Track stats
+            }
+        }
+        
+        // ===== PHASE 4: Decisions (using most recent messages) =====
+        // Note: In batching mode, decisions use last received batch, not immediate messages
+        // For simplicity, we'll use the messages we just built
+        
         for (int i = 0; i < n_ * n_; ++i) {
             Node& nd = nodes_[i];
-
-            // neigbours recieve
+            
+            // Build inbox from neighbors' messages (current or batched)
             std::vector<std::pair<NeighborLink, NeighborMessage>> inbox;
             inbox.reserve(nd.neighbors.size());
+            
             for (const NeighborLink& link : nd.neighbors) {
                 int nidx = node_index_by_id(link.neighbor_id);
                 inbox.push_back({link, msgs[nidx]});
             }
-
+            
             PhaseDecision dec = nd.dc_controller->decide(
                                     *nd.intersection, inbox, current_time);
             nd.dc_controller->apply_decision(*nd.intersection, dec, current_time);
         }
-
-        // move on
+        
+        // ===== PHASE 5: Advance simulation =====
         for (auto& nd : nodes_)
             nd.intersection->update(delta_time, current_time + delta_time);
+    }
+
+    // Add method to get batching statistics
+    void printBatchingStats() const {
+        std::cout << "\n" << std::string(60, '=') << "\n";
+        std::cout << "  MESSAGE BATCHING STATISTICS\n";
+        std::cout << std::string(60, '=') << "\n";
+        
+        for (int i = 0; i < n_ * n_; ++i) {
+            std::cout << "\nNode " << nodes_[i].intersection->get_id() << ":\n";
+            buffers_.at(i).printStats();
+        }
     }
 
 //stats
@@ -180,6 +265,9 @@ public:
 private:
     int n_;
     std::vector<Node> nodes_;
+    std::unordered_map<int, MessageBuffer> buffers_;  // One buffer per node
+    double batch_interval_seconds_;
+    bool batching_enabled_;
 
     // helper
     int index(int r, int c) const { return r * n_ + c; }

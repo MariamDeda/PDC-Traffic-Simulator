@@ -2,11 +2,13 @@
 #define DECENTRALIZED_CONTROLLER_H
 
 #include "Intersection.h"
+#include "RealTimeDeadline.h"
 
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <memory>
 
 struct NeighborMessage {
     std::string sender_id;
@@ -44,6 +46,12 @@ public:
     void apply_decision(Intersection& intersection,
                         const PhaseDecision& decision,
                         double current_time) const;
+    
+    void enableDeadlineEnforcement(bool enable, double deadline_ms = 50.0);
+    const DeadlineStats& getDeadlineStats() const;
+    void printDeadlineStats() const;
+    void resetDeadlineStats();
+
 
 private:
     std::string intersection_id_;
@@ -61,6 +69,15 @@ private:
     double consensus_bias(bool ns_candidate,
                           const std::vector<std::pair<NeighborLink, NeighborMessage>>& neighbor_messages) const;
     bool phase_is_ns(SignalPhase phase) const;
+
+    // Deadline enforcement
+    std::unique_ptr<DeadlineEnforcer> deadline_enforcer_;
+    bool use_deadline_enforcement_;
+
+    PhaseDecision computeDecision(
+        const Intersection& intersection,
+        const std::vector<std::pair<NeighborLink, NeighborMessage>>& neighbor_messages,
+        double current_time);
 };
 
 #endif

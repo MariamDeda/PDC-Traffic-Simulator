@@ -262,6 +262,23 @@ public:
         }
     }
 
+    // Deadline enforcement
+    void enableDeadlineEnforcementForAll(bool enable, double deadline_ms = 50.0) {
+        for (auto& nd : nodes_) {
+            nd.dc_controller->enableDeadlineEnforcement(enable, deadline_ms);
+        }
+    }
+
+    void printAllDeadlineStats() const {
+        std::cout << "\n" << std::string(60, '=') << "\n";
+        std::cout << "  DEADLINE ENFORCEMENT STATISTICS (per node)\n";
+        std::cout << std::string(60, '=') << "\n";
+        for (const auto& nd : nodes_) {
+            std::cout << "\nNode " << nd.intersection->get_id() << ":\n";
+            nd.dc_controller->printDeadlineStats();
+        }
+    }
+    
 private:
     int n_;
     std::vector<Node> nodes_;

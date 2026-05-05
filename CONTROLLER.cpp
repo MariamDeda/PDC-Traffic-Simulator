@@ -33,6 +33,10 @@ void Controller::update(Intersection& intersection, double current_time) {
 
     IntersectionState state = intersection.get_state();
 
+if (state.phase_timer > 1.0) {
+    return;
+}
+
     double NS = compute_NS_demand(state);
     double EW = compute_EW_demand(state);
 

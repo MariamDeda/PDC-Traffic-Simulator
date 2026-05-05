@@ -3,10 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <sstream>
-
-// for slow computation simulation (temporary)
-// #include <thread>
-// #include <chrono>
+#include <utility>
 
 namespace {
 int queue_for(const NeighborMessage& msg, Direction d) {
@@ -20,16 +17,25 @@ double wait_for(const NeighborMessage& msg, Direction d) {
 }
 }  // namespace
 
-DecentralizedController::DecentralizedController(std::string intersection_id)
-    : intersection_id_(std::move(intersection_id)), last_preferred_ns_(true), fairness_bias_(0.0),
-    use_deadline_enforcement_(false)  // ADDED
-    {
-        deadline_enforcer_ = std::make_unique<DeadlineEnforcer>(50.0, false);
-    }
 
-NeighborMessage DecentralizedController::build_local_message(const Intersection& intersection,
-                                                             double current_time) const {
+// ===================== CONSTRUCTOR =====================
+
+DecentralizedController::DecentralizedController(std::string intersection_id)
+    : intersection_id_(std::move(intersection_id)),
+      last_preferred_ns_(true),
+      fairness_bias_(0.0),
+      deadline_enforcer_(std::make_unique<DeadlineEnforcer>(50.0, false)),
+      use_deadline_enforcement_(false) {}
+
+
+// ===================== MESSAGE BUILDING =====================
+
+NeighborMessage DecentralizedController::build_local_message(
+    const Intersection& intersection,
+    double current_time
+) const {
     const IntersectionState state = intersection.get_state();
+
     NeighborMessage msg;
     msg.sender_id = intersection_id_;
     msg.timestamp = current_time;
@@ -38,57 +44,84 @@ NeighborMessage DecentralizedController::build_local_message(const Intersection&
     msg.prefers_ns = phase_is_ns(state.current_phase);
 
     for (int d = 0; d < 4; ++d) {
-        const Direction dir = static_cast<Direction>(d);
+        Direction dir = static_cast<Direction>(d);
         msg.directional_queues[dir] = state.queue_lengths.at(dir).at("total");
         msg.directional_waits[dir] = state.wait_times.at(dir);
     }
+
     return msg;
 }
 
-double DecentralizedController::queue_sum(const IntersectionState& state,
-                                          Direction a,
-                                          Direction b) const {
-    return state.queue_lengths.at(a).at("total") + state.queue_lengths.at(b).at("total");
+
+// ===================== BASIC HELPERS =====================
+
+double DecentralizedController::queue_sum(
+    const IntersectionState& state,
+    Direction a,
+    Direction b
+) const {
+    return state.queue_lengths.at(a).at("total") +
+           state.queue_lengths.at(b).at("total");
 }
 
-double DecentralizedController::wait_sum(const IntersectionState& state,
-                                         Direction a,
-                                         Direction b) const {
+double DecentralizedController::wait_sum(
+    const IntersectionState& state,
+    Direction a,
+    Direction b
+) const {
     return state.wait_times.at(a) + state.wait_times.at(b);
 }
+
+bool DecentralizedController::phase_is_ns(SignalPhase phase) const {
+    return phase == SignalPhase::NORTH_SOUTH_GREEN ||
+           phase == SignalPhase::NORTH_SOUTH_YELLOW;
+}
+
+
+// ===================== NEIGHBOR-BASED HELPERS =====================
 
 double DecentralizedController::upstream_pressure(
     Direction axis_a,
     Direction axis_b,
-    const std::vector<std::pair<NeighborLink, NeighborMessage>>& neighbor_messages) const {
+    const std::vector<std::pair<NeighborLink, NeighborMessage>>& neighbor_messages
+) const {
     double pressure = 0.0;
+
     for (const auto& entry : neighbor_messages) {
         const NeighborLink& link = entry.first;
         const NeighborMessage& msg = entry.second;
 
         if (link.relative_position == axis_a) {
-            const Direction toward_me = (axis_a == Direction::NORTH) ? Direction::SOUTH
-                                      : (axis_a == Direction::SOUTH) ? Direction::NORTH
-                                      : (axis_a == Direction::EAST)  ? Direction::WEST
-                                                                     : Direction::EAST;
+            Direction toward_me =
+                (axis_a == Direction::NORTH) ? Direction::SOUTH :
+                (axis_a == Direction::SOUTH) ? Direction::NORTH :
+                (axis_a == Direction::EAST)  ? Direction::WEST  :
+                                               Direction::EAST;
+
             pressure += queue_for(msg, toward_me) + 0.2 * wait_for(msg, toward_me);
         }
+
         if (link.relative_position == axis_b) {
-            const Direction toward_me = (axis_b == Direction::NORTH) ? Direction::SOUTH
-                                      : (axis_b == Direction::SOUTH) ? Direction::NORTH
-                                      : (axis_b == Direction::EAST)  ? Direction::WEST
-                                                                     : Direction::EAST;
+            Direction toward_me =
+                (axis_b == Direction::NORTH) ? Direction::SOUTH :
+                (axis_b == Direction::SOUTH) ? Direction::NORTH :
+                (axis_b == Direction::EAST)  ? Direction::WEST  :
+                                               Direction::EAST;
+
             pressure += queue_for(msg, toward_me) + 0.2 * wait_for(msg, toward_me);
         }
     }
+
     return pressure;
 }
 
 double DecentralizedController::downstream_blocking(
     Direction axis_a,
     Direction axis_b,
-    const std::vector<std::pair<NeighborLink, NeighborMessage>>& neighbor_messages) const {
+    const std::vector<std::pair<NeighborLink, NeighborMessage>>& neighbor_messages
+) const {
     double blocking = 0.0;
+
     for (const auto& entry : neighbor_messages) {
         const NeighborLink& link = entry.first;
         const NeighborMessage& msg = entry.second;
@@ -96,137 +129,243 @@ double DecentralizedController::downstream_blocking(
         if (link.relative_position == axis_a) {
             blocking += queue_for(msg, axis_a);
         }
+
         if (link.relative_position == axis_b) {
             blocking += queue_for(msg, axis_b);
         }
     }
+
     return blocking;
 }
 
 double DecentralizedController::consensus_bias(
     bool ns_candidate,
-    const std::vector<std::pair<NeighborLink, NeighborMessage>>& neighbor_messages) const {
+    const std::vector<std::pair<NeighborLink, NeighborMessage>>& neighbor_messages
+) const {
     double bias = 0.0;
+
     for (const auto& entry : neighbor_messages) {
         const NeighborLink& link = entry.first;
         const NeighborMessage& msg = entry.second;
-        const bool same_corridor = (ns_candidate &&
-                                    (link.relative_position == Direction::NORTH ||
-                                     link.relative_position == Direction::SOUTH)) ||
-                                   (!ns_candidate &&
-                                    (link.relative_position == Direction::EAST ||
-                                     link.relative_position == Direction::WEST));
+
+        bool same_corridor =
+            (ns_candidate &&
+             (link.relative_position == Direction::NORTH ||
+              link.relative_position == Direction::SOUTH)) ||
+            (!ns_candidate &&
+             (link.relative_position == Direction::EAST ||
+              link.relative_position == Direction::WEST));
+
         if (!same_corridor) {
             continue;
         }
+
         bias += (msg.prefers_ns == ns_candidate) ? 1.0 : -0.7;
     }
+
     return bias;
 }
 
-bool DecentralizedController::phase_is_ns(SignalPhase phase) const {
-    return phase == SignalPhase::NORTH_SOUTH_GREEN || phase == SignalPhase::NORTH_SOUTH_YELLOW;
-}
+
+// ===================== DECISION LOGIC =====================
 
 PhaseDecision DecentralizedController::decide(
     const Intersection& intersection,
     const std::vector<std::pair<NeighborLink, NeighborMessage>>& neighbor_messages,
-    double current_time) {
-    
-    // If deadline enforcement is enabled, measure time
+    double current_time
+) {
+    (void)current_time;
+
     if (use_deadline_enforcement_) {
         deadline_enforcer_->startDecision();
-
-        // Simulate heavy computation (100ms - will miss 50ms deadline)
-        // std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-    
-    // ===== YOUR ORIGINAL DECISION LOGIC GOES HERE =====
-    // (Copy your existing decision code exactly as it was)
-    
+
     const IntersectionState state = intersection.get_state();
     const TimingConstraints& constraints = intersection.get_constraints();
-    
-    // Get queue lengths using .at() (const-safe)
-    int ns_q = state.queue_lengths.at(Direction::NORTH).at("total") + 
-               state.queue_lengths.at(Direction::SOUTH).at("total");
-    int ew_q = state.queue_lengths.at(Direction::EAST).at("total") + 
-               state.queue_lengths.at(Direction::WEST).at("total");
-    
-    // Your existing scoring logic...
-    double ns_score = ns_q;  // Replace with your actual scoring
-    double ew_score = ew_q;  // Replace with your actual scoring
-    
-    bool currently_ns = (state.current_phase == SignalPhase::NORTH_SOUTH_GREEN ||
-                         state.current_phase == SignalPhase::NORTH_SOUTH_YELLOW);
-    
+
+    int ns_q = queue_sum(state, Direction::NORTH, Direction::SOUTH);
+    int ew_q = queue_sum(state, Direction::EAST, Direction::WEST);
+
+    double ns_wait = wait_sum(state, Direction::NORTH, Direction::SOUTH);
+    double ew_wait = wait_sum(state, Direction::EAST, Direction::WEST);
+
+    double ns_upstream = upstream_pressure(
+        Direction::NORTH,
+        Direction::SOUTH,
+        neighbor_messages
+    );
+
+    double ew_upstream = upstream_pressure(
+        Direction::EAST,
+        Direction::WEST,
+        neighbor_messages
+    );
+
+    double ns_downstream_block = downstream_blocking(
+        Direction::NORTH,
+        Direction::SOUTH,
+        neighbor_messages
+    );
+
+    double ew_downstream_block = downstream_blocking(
+        Direction::EAST,
+        Direction::WEST,
+        neighbor_messages
+    );
+
+    double ns_consensus = consensus_bias(true, neighbor_messages);
+    double ew_consensus = consensus_bias(false, neighbor_messages);
+
+    /*
+        Score meaning:
+        - local queue has strongest effect
+        - local wait time matters
+        - upstream neighbor pressure encourages corridor flow
+        - downstream blocking discourages sending cars into congestion
+        - consensus bias lightly encourages coordination with neighbors
+    */
+    double ns_score =
+        static_cast<double>(ns_q) +
+        0.5 * ns_wait +
+        0.7 * ns_upstream -
+        0.4 * ns_downstream_block +
+        1.0 * ns_consensus;
+
+    double ew_score =
+        static_cast<double>(ew_q) +
+        0.5 * ew_wait +
+        0.7 * ew_upstream -
+        0.4 * ew_downstream_block +
+        1.0 * ew_consensus;
+
+    bool currently_ns = phase_is_ns(state.current_phase);
     bool choose_ns = currently_ns;
-    if (ns_score > ew_score) {
+
+    const double SWITCH_THRESHOLD = 1.0;
+
+    if (ns_score > ew_score + SWITCH_THRESHOLD) {
         choose_ns = true;
-    } else if (ew_score > ns_score) {
+    } else if (ew_score > ns_score + SWITCH_THRESHOLD) {
         choose_ns = false;
     }
-    
-    double duration = constraints.min_green + (ns_q + ew_q) / 100.0 * 
-                      (constraints.max_green - constraints.min_green);
-    duration = std::min(std::max(duration, (double)constraints.min_green), 
-                        (double)constraints.max_green);
-    
+
+    int total_q = ns_q + ew_q;
+    double congestion_ratio = std::min(1.0, static_cast<double>(total_q) / 50.0);
+
+    double duration =
+        static_cast<double>(constraints.min_green) +
+        congestion_ratio *
+        static_cast<double>(constraints.max_green - constraints.min_green);
+
+    duration = std::max(
+        static_cast<double>(constraints.min_green),
+        std::min(duration, static_cast<double>(constraints.max_green))
+    );
+
     PhaseDecision decision;
-    decision.phase = choose_ns ? SignalPhase::NORTH_SOUTH_GREEN : SignalPhase::EAST_WEST_GREEN;
+    decision.phase = choose_ns
+        ? SignalPhase::NORTH_SOUTH_GREEN
+        : SignalPhase::EAST_WEST_GREEN;
+
     decision.duration = duration;
     decision.ns_score = ns_score;
     decision.ew_score = ew_score;
-    decision.reason = "Normal decision";
-    
-    // ===== CHECK DEADLINE =====
+
+    std::ostringstream reason;
+    reason << "Decentralized decision | "
+           << "NS score=" << ns_score
+           << ", EW score=" << ew_score
+           << ", local NS q=" << ns_q
+           << ", local EW q=" << ew_q;
+
+    decision.reason = reason.str();
+
     if (use_deadline_enforcement_) {
         if (!deadline_enforcer_->checkDeadline()) {
-            // Deadline missed - use simple fallback
             deadline_enforcer_->recordFallbackUsed();
-            
-            // Simple fallback: give green to direction with more cars
+
             PhaseDecision fallback;
+
             if (ns_q > ew_q * 1.5) {
                 fallback.phase = SignalPhase::NORTH_SOUTH_GREEN;
             } else if (ew_q > ns_q * 1.5) {
                 fallback.phase = SignalPhase::EAST_WEST_GREEN;
             } else {
-                fallback.phase = decision.phase;  // Stay as is
+                fallback.phase = decision.phase;
             }
-            
-            double total_q = ns_q + ew_q;
-            double ratio = std::min(1.0, total_q / 50.0);
-            fallback.duration = constraints.min_green + ratio * (constraints.max_green - constraints.min_green);
-            fallback.reason = "FALLBACK (deadline missed: " + 
-                              std::to_string(deadline_enforcer_->getDeadlineMs()) + "ms)";
+
+            double fallback_ratio =
+                std::min(1.0, static_cast<double>(total_q) / 50.0);
+
+            fallback.duration =
+                static_cast<double>(constraints.min_green) +
+                fallback_ratio *
+                static_cast<double>(constraints.max_green - constraints.min_green);
+
             fallback.ns_score = ns_score;
             fallback.ew_score = ew_score;
-            
+
+            fallback.reason =
+                "FALLBACK used because decision exceeded deadline of " +
+                std::to_string(deadline_enforcer_->getDeadlineMs()) +
+                " ms";
+
             return fallback;
         }
     }
-    
+
+    last_preferred_ns_ = choose_ns;
+
     return decision;
 }
 
-void DecentralizedController::apply_decision(Intersection& intersection,
-                                             const PhaseDecision& decision,
-                                             double current_time) const {
+
+// ===================== APPLY DECISION =====================
+
+void DecentralizedController::apply_decision(
+    Intersection& intersection,
+    const PhaseDecision& decision,
+    double current_time
+) const {
+    IntersectionState state = intersection.get_state();
+
+    /*
+        IMPORTANT:
+        Do not reset the phase timer every simulation step.
+
+        The previous version called set_phase() every tick.
+        That kept restarting the green timer, so yellow phases
+        and natural phase cycling could fail.
+
+        This version only applies a new decision when the current
+        phase is basically finished.
+    */
+    if (state.phase_timer > 1.0) {
+        return;
+    }
+
     intersection.set_phase(decision.phase, decision.duration, current_time);
 }
 
-// Real-time deadline enforcement
-void DecentralizedController::enableDeadlineEnforcement(bool enable, double deadline_ms) {
+
+// ===================== DEADLINE ENFORCEMENT =====================
+
+void DecentralizedController::enableDeadlineEnforcement(
+    bool enable,
+    double deadline_ms
+) {
     use_deadline_enforcement_ = enable;
     deadline_enforcer_->enable(enable);
+
     if (enable) {
         deadline_enforcer_->setDeadlineMs(deadline_ms);
         deadline_enforcer_->resetStats();
-        std::cout << "[Controller " << intersection_id_ 
-                  << "] Deadline enforcement ENABLED (" << deadline_ms << "ms)\n";
+
+        std::cout << "[Controller " << intersection_id_
+                  << "] Deadline enforcement ENABLED ("
+                  << deadline_ms << "ms)\n";
     } else {
-        std::cout << "[Controller " << intersection_id_ 
+        std::cout << "[Controller " << intersection_id_
                   << "] Deadline enforcement DISABLED\n";
     }
 }

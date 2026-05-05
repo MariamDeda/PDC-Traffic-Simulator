@@ -1,48 +1,95 @@
-// test_batching.cpp - Compare batching vs no batching
+// test_batching.cpp - Compare decentralized simulation with batching enabled vs disabled.
 #include "NxNMeshNetwork.h"
-#include <iostream>
-#include <iomanip>
+
 #include <chrono>
+#include <iomanip>
+#include <iostream>
+#include <string>
+#include <vector>
 
 using namespace std;
 
 struct BatchingComparison {
     string test_name;
-    int vehicles_processed;
-    double avg_wait;
-    double throughput;
-    int messages_sent_equivalent;
-    double batching_reduction_percent;
-    long long simulation_time_ms;
+    int vehicles_processed = 0;
+    double avg_wait = 0.0;
+    double throughput = 0.0;
+    double batching_reduction_percent = 0.0;
+    long long simulation_time_ms = 0;
 };
 
+BatchingComparison runScenario(const string& name,
+                               bool batching_enabled,
+                               double batch_interval_seconds,
+                               double reduction_estimate_percent) {
+    NxNMeshNetwork network(3, ScenarioType::RUSH_HOUR_NS);
+    network.enableBatching(batching_enabled, batch_interval_seconds);
+
+    const double SIM_DURATION = 60.0;
+    const double TIME_STEP = 1.0;
+    double current_time = 0.0;
+
+    auto start = chrono::high_resolution_clock::now();
+
+    for (int step = 0; step < static_cast<int>(SIM_DURATION / TIME_STEP); ++step) {
+        network.step_decentralized(current_time, TIME_STEP);
+        current_time += TIME_STEP;
+    }
+
+    auto end = chrono::high_resolution_clock::now();
+    auto duration = chrono::duration_cast<chrono::milliseconds>(end - start);
+
+    auto stats = network.collect_stats(SIM_DURATION);
+
+    BatchingComparison result;
+    result.test_name = name;
+    result.vehicles_processed = stats.total_processed;
+    result.avg_wait = stats.avg_wait;
+    result.throughput = stats.throughput_vpm;
+    result.batching_reduction_percent = reduction_estimate_percent;
+    result.simulation_time_ms = duration.count();
+
+    cout << "   Completed: " << stats.total_processed << " vehicles processed\n";
+
+    if (batching_enabled) {
+        network.printBatchingStats();
+    }
+
+    return result;
+}
+
 void printComparisonTable(const vector<BatchingComparison>& results) {
-    cout << "\n" << string(80, '=') << "\n";
+    cout << "\n" << string(90, '=') << "\n";
     cout << "  BATCHING vs NO BATCHING COMPARISON\n";
-    cout << string(80, '=') << "\n\n";
-    
+    cout << string(90, '=') << "\n\n";
+
     cout << left
-         << setw(20) << "Configuration"
-         << setw(15) << "Vehicles"
-         << setw(15) << "Avg Wait (s)"
-         << setw(15) << "Throughput"
-         << setw(20) << "Msg Reduction"
-         << setw(15) << "Time (ms)"
+         << setw(24) << "Configuration"
+         << setw(14) << "Vehicles"
+         << setw(16) << "Avg Wait (s)"
+         << setw(16) << "Throughput"
+         << setw(18) << "Msg Reduction"
+         << setw(12) << "Time (ms)"
          << "\n";
-    cout << string(80, '-') << "\n";
-    
+
+    cout << string(90, '-') << "\n";
+
     for (const auto& r : results) {
+        string reduction = (r.batching_reduction_percent > 0.0)
+            ? to_string(static_cast<int>(r.batching_reduction_percent)) + "% est."
+            : "N/A";
+
         cout << left
-             << setw(20) << r.test_name
-             << setw(15) << r.vehicles_processed
-             << setw(15) << fixed << setprecision(2) << r.avg_wait
-             << setw(15) << setprecision(1) << r.throughput
-             << setw(19) << (r.batching_reduction_percent > 0 ? 
-                 to_string((int)r.batching_reduction_percent) + "%" : "N/A")
-             << setw(15) << r.simulation_time_ms
+             << setw(24) << r.test_name
+             << setw(14) << r.vehicles_processed
+             << setw(16) << fixed << setprecision(2) << r.avg_wait
+             << setw(16) << fixed << setprecision(1) << r.throughput
+             << setw(18) << reduction
+             << setw(12) << r.simulation_time_ms
              << "\n";
     }
-    cout << string(80, '=') << "\n";
+
+    cout << string(90, '=') << "\n";
 }
 
 int main() {
@@ -50,129 +97,25 @@ int main() {
     cout << "Message Batching Performance Test\n";
     cout << "Milestone 3 - Task: Message Batching\n";
     cout << "========================================\n\n";
-    
+
     vector<BatchingComparison> results;
-    
-    // ===== TEST 1: NO BATCHING (Baseline) =====
+
     cout << "Test 1: Running WITHOUT batching...\n";
-    {
-        NxNMeshNetwork network(3, ScenarioType::RUSH_HOUR_NS);
-        network.enableBatching(false);  // Disable batching
-        
-        auto start = chrono::high_resolution_clock::now();
-        
-        double current_time = 0;
-        const double SIM_DURATION = 60.0;  // 60 seconds
-        const double TIME_STEP = 1.0;
-        
-        for (int step = 0; step < SIM_DURATION / TIME_STEP; step++) {
-            network.step_decentralized(current_time, TIME_STEP);
-            current_time += TIME_STEP;
-        }
-        
-        auto end = chrono::high_resolution_clock::now();
-        auto duration = chrono::duration_cast<chrono::milliseconds>(end - start);
-        
-        auto stats = network.collect_stats(SIM_DURATION);
-        
-        BatchingComparison comp;
-        comp.test_name = "No Batching (M2)";
-        comp.vehicles_processed = stats.total_processed;
-        comp.avg_wait = stats.avg_wait;
-        comp.throughput = stats.throughput_vpm;
-        comp.batching_reduction_percent = 0;
-        comp.simulation_time_ms = duration.count();
-        results.push_back(comp);
-        
-        cout << "   Completed: " << stats.total_processed << " vehicles processed\n\n";
-    }
-    
-    // ===== TEST 2: WITH BATCHING (5 second interval) =====
-    cout << "Test 2: Running WITH batching (5s interval)...\n";
-    {
-        NxNMeshNetwork network(3, ScenarioType::RUSH_HOUR_NS);
-        network.enableBatching(true, 5.0);  // Batch every 5 seconds
-        
-        auto start = chrono::high_resolution_clock::now();
-        
-        double current_time = 0;
-        const double SIM_DURATION = 60.0;
-        const double TIME_STEP = 1.0;
-        
-        for (int step = 0; step < SIM_DURATION / TIME_STEP; step++) {
-            network.step_decentralized(current_time, TIME_STEP);
-            current_time += TIME_STEP;
-        }
-        
-        auto end = chrono::high_resolution_clock::now();
-        auto duration = chrono::duration_cast<chrono::milliseconds>(end - start);
-        
-        auto stats = network.collect_stats(SIM_DURATION);
-        
-        BatchingComparison comp;
-        comp.test_name = "Batching (5s)";
-        comp.vehicles_processed = stats.total_processed;
-        comp.avg_wait = stats.avg_wait;
-        comp.throughput = stats.throughput_vpm;
-        comp.simulation_time_ms = duration.count();
-        
-        // Estimate message reduction
-        // With 9 nodes, 4 neighbors each ≈ 36 messages per step
-        // 60 steps = 2160 messages without batching
-        // With 5s batching: 60/5 = 12 batches, 36×12 = 432 messages
-        comp.batching_reduction_percent = (1.0 - 12.0/60.0) * 100;  // ~80% reduction
-        results.push_back(comp);
-        
-        cout << "   Completed: " << stats.total_processed << " vehicles processed\n";
-        network.printBatchingStats();
-    }
-    
-    // ===== TEST 3: WITH BATCHING + COMPRESSION (if available) =====
-    cout << "\nTest 3: Running WITH batching + compression...\n";
-    {
-        NxNMeshNetwork network(3, ScenarioType::RUSH_HOUR_NS);
-        network.enableBatching(true, 5.0);
-        // Note: Compression would need to be enabled in MessageBuffer
-        
-        auto start = chrono::high_resolution_clock::now();
-        
-        double current_time = 0;
-        const double SIM_DURATION = 60.0;
-        const double TIME_STEP = 1.0;
-        
-        for (int step = 0; step < SIM_DURATION / TIME_STEP; step++) {
-            network.step_decentralized(current_time, TIME_STEP);
-            current_time += TIME_STEP;
-        }
-        
-        auto end = chrono::high_resolution_clock::now();
-        auto duration = chrono::duration_cast<chrono::milliseconds>(end - start);
-        
-        auto stats = network.collect_stats(SIM_DURATION);
-        
-        BatchingComparison comp;
-        comp.test_name = "Batching + Compress";
-        comp.vehicles_processed = stats.total_processed;
-        comp.avg_wait = stats.avg_wait;
-        comp.throughput = stats.throughput_vpm;
-        comp.batching_reduction_percent = 85;  // Estimated
-        comp.simulation_time_ms = duration.count();
-        results.push_back(comp);
-        
-        cout << "   Completed: " << stats.total_processed << " vehicles processed\n";
-    }
-    
-    // ===== PRINT COMPARISON TABLE =====
+    results.push_back(runScenario("No batching", false, 5.0, 0.0));
+
+    cout << "\nTest 2: Running WITH batching, 5 second interval...\n";
+    results.push_back(runScenario("Batching 5s", true, 5.0, 80.0));
+
+    cout << "\nTest 3: Running WITH batching, 10 second interval...\n";
+    results.push_back(runScenario("Batching 10s", true, 10.0, 90.0));
+
     printComparisonTable(results);
-    
-    // ===== CONCLUSION =====
+
     cout << "\nCONCLUSIONS:\n";
-    cout << "   Message batching reduces network overhead by 80-90%\n";
-    cout << "   Slight increase in latency is acceptable for traffic control\n";
-    cout << "   Compression can further reduce bandwidth by 50-70%\n";
-    cout << "   Vehicle processing rate remains similar (no degradation)\n";
-    
-    cout << "\nMessage Batching implementation complete for Milestone 3!\n";
-    
+    cout << "   Message batching reduces communication overhead by grouping neighbor updates.\n";
+    cout << "   Vehicle throughput should remain in the same general range across runs.\n";
+    cout << "   Exact vehicle counts vary because the traffic generator uses randomness.\n";
+    cout << "\nMessage batching implementation test complete.\n";
+
     return 0;
 }
